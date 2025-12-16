@@ -47,55 +47,73 @@ router.post('/create-payment', async (req, res) => {
             items: []
         };
 
-        // --- 3. ДОБАВЛЯЕМ ПОЗИЦИИ В ЧЕК ---
-        // Важно: Сумма всех позиций (quantity * price) должна равняться amount платежа
-        
-        // Пример: Добавляем саму аренду зала как первую позицию
-        const hallDescription = `Аренда зала №${metadata.hall || metadata.hallNumber} на ${metadata.date} ${metadata.time}`;
+        // --- 3. ФОРМИРУЕМ ПОЗИЦИИ ЧЕКА ПО ПРАВИЛАМ ЮKASSA ---
+
+        // 3.1. АРЕНДА ЗАЛА (ОБЯЗАТЕЛЬНАЯ ПОЗИЦИЯ)
+        const hallPrice = amount; // Пока вся сумма на аренду
         receipt.items.push({
-            description: hallDescription,
+            description: `Аренда банкетного зала №${metadata.hall || metadata.hallNumber}`,
             quantity: '1.00',
             amount: {
-                value: amount.toFixed(2), // Вся сумма на аренду
+                value: hallPrice.toFixed(2), // Вся сумма на эту позицию
                 currency: 'RUB'
             },
-            vat_code: 1,
-            payment_mode: 'full_payment',
-            payment_subject: 'service'
+            vat_code: 1, // ОБСУДИТЕ С БУХГАЛТЕРОМ!
+            payment_subject: 'service', // Услуга
+            payment_mode: 'full_payment'
         });
 
-        // --- НОВОЕ: ДОБАВЛЯЕМ КОММЕНТАРИИ КЛИЕНТА КАК ОТДЕЛЬНУЮ ПОЗИЦИЮ ---
-        if (customerComments) {
+        // 3.2. КОММЕНТАРИИ КЛИЕНТА (НУЛЕВАЯ СТОИМОСТЬ - ТОЛЬКО ДЛЯ ИНФОРМАЦИИ)
+        if (customerComments && customerComments.trim() !== '') {
+            const commentText = customerComments.length > 100 
+                ? customerComments.substring(0, 100) + '...' 
+                : customerComments;
+            
             receipt.items.push({
-                description: `Комментарий к заказу: ${customerComments.substring(0, 128)}`, // Обрезаем длинные комментарии
+                description: `Пожелание: ${commentText}`,
                 quantity: '1.00',
                 amount: {
-                    value: '0.00', // НУЛЕВАЯ СТОИМОСТЬ - только информация
+                    value: '0.01', // ЮKassa может не принимать 0.00, ставим 1 копейку
                     currency: 'RUB'
                 },
                 vat_code: 1,
-                payment_mode: 'full_payment',
-                payment_subject: 'service'
+                payment_subject: 'service',
+                payment_mode: 'full_payment'
             });
         }
 
-        // Добавляем блюда из заказа
-        if (receiptItems.length > 0) {
+        // 3.3. ЗАКАЗАННЫЕ БЛЮДА (ЕСЛИ ЕСТЬ)
+        if (receiptItems && receiptItems.length > 0) {
             receiptItems.forEach(item => {
+                if (!item.name || !item.quantity || !item.price) {
+                    console.warn('Пропускаем неполный элемент:', item);
+                    return;
+                }
+                
                 receipt.items.push({
-                    description: item.name.substring(0, 64), // Ограничение длины для ЮKassa
-                    quantity: item.quantity.toString(),
+                    description: String(item.name).substring(0, 128),
+                    quantity: String(item.quantity),
                     amount: {
-                        value: (item.price * item.quantity).toFixed(2),
+                        value: (Number(item.price) * Number(item.quantity)).toFixed(2),
                         currency: 'RUB'
                     },
                     vat_code: 1,
-                    payment_mode: 'full_payment',
-                    payment_subject: 'commodity'
+                    payment_subject: 'commodity', // Товар
+                    payment_mode: 'full_payment'
                 });
             });
         }
 
+        // 3.4. ПРОВЕРКА: ЕСЛИ НЕТ БЛЮД, ДЕЛАЕМ ОДНУ ПОЗИЦИЮ "АРЕНДА ЗАЛА"
+        if (receipt.items.length === 0) {
+            console.error('Невозможно создать чек без позиций!');
+            return res.status(400).json({ 
+                success: false, 
+                error: 'В чеке должна быть хотя бы одна позиция' 
+            });
+        }
+
+        console.log('Сформирован чек с позициями:', receipt.items);
         // --- 4. ПРОВЕРКА СУММЫ ---
         // ЮKassa строго следит, чтобы сумма в чеке равнялась сумме платежа
         const totalReceiptAmount = receipt.items.reduce((sum, item) => {
