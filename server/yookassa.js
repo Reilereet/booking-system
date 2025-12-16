@@ -7,61 +7,74 @@ const yooKassaClient = new YooCheckout({
     secretKey: process.env.YOOKASSA_SECRET_KEY
 });
 
-// Создание платежа
 router.post('/create-payment', async (req, res) => {
     try {
+        // 1. Получаем ВСЕ данные из тела запроса от вашего фронтенда (Tilda)
         const {
             amount,
-            description = 'Бронирование банкетного зала',
+            description,
             return_url,
+            email, // Клиентский email ДОЛЖЕН передаваться с фронтенда
             metadata = {}
         } = req.body;
 
-        // Проверка минимальной суммы (1 рубль)
+        // 2. Простая валидация обязательных полей
         if (!amount || amount < 1) {
             return res.status(400).json({ 
                 success: false, 
                 error: 'Некорректная сумма оплаты' 
             });
         }
+        if (!email) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Для создания платежа требуется email клиента' 
+            });
+        }
 
-        const idempotenceKey = uuidv4();
+        const idempotenceKey = require('uuid').v4();
         
-        console.log('Создание платежа ЮKassa:', {
-            amount,
-            description,
-            metadata
-        });
+        console.log('Создание платежа. Данные:', { amount, description, email });
 
-        const payment = await yooKassaClient.createPayment({
-            amount: { value: amount.toFixed(2), currency: 'RUB' },
-            payment_method_data: { type: 'bank_card' },
-            confirmation: { type: 'redirect', return_url: return_url },
-            description: description,
+        // 3. Формируем объект платежа для ЮKassa
+        const paymentData = {
+            amount: {
+                value: amount.toFixed(2),
+                currency: 'RUB'
+            },
+            payment_method_data: {
+                type: 'bank_card'
+            },
+            confirmation: {
+                type: 'redirect',
+                return_url: return_url
+            },
+            description: description || 'Оплата бронирования',
             metadata: metadata,
             capture: true,
-            // НОВЫЙ БЛОК: Данные для фискального чека (54-ФЗ)
+            // 4. Добавляем чек, если передан email
             receipt: {
                 customer: {
-                    // Используйте данные из bookingData.contact
-                    email: bookingData.contact.email || 'client@example.com', // Обязательно
-                    // phone: bookingData.contact.phone // Альтернатива email
+                    email: email // Используем email из запроса
                 },
                 items: [
                     {
-                        description: description, // Краткое описание
-                        quantity: '1', // Количество
+                        description: description || 'Бронирование банкетного зала',
+                        quantity: '1.00',
                         amount: {
-                            value: amount.toFixed(2), // Стоимость
+                            value: amount.toFixed(2),
                             currency: 'RUB'
                         },
-                        vat_code: 1, // Ставка НДС (1 = 20%)
-                        payment_mode: 'full_payment', // Полный расчет
-                        payment_subject: 'service' // Предмет расчета (услуга)
+                        vat_code: 1, // Ставка НДС 20%
+                        payment_mode: 'full_payment',
+                        payment_subject: 'service'
                     }
                 ]
             }
-        }, idempotenceKey);
+        };
+
+        // 5. Создаем платеж
+        const payment = await yooKassaClient.createPayment(paymentData, idempotenceKey);
 
         console.log('Платеж создан:', payment.id);
 
