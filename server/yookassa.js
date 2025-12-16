@@ -1,6 +1,15 @@
-const router = require('express').Router();
-const { v4: uuidv4 } = require('uuid');
-const { YooCheckout } = require('@a2seven/yoo-checkout');
+// После извлечения данных:
+const receiptItems = metadata.items || [];
+const customerComments = metadata.comments?.trim() || '';
+
+// УБЕДИТЕСЬ, что items - это МАССИВ
+if (!Array.isArray(receiptItems)) {
+    console.error('❌ items не является массивом:', receiptItems);
+    return res.status(400).json({ 
+        success: false, 
+        error: 'Некорректный формат данных заказа' 
+    });
+}
 
 const yooKassaClient = new YooCheckout({
     shopId: process.env.YOOKASSA_SHOP_ID,
@@ -47,33 +56,65 @@ router.post('/create-payment', async (req, res) => {
             items: []
         };
 
-        // --- 3. ФОРМИРУЕМ ПОЗИЦИИ ЧЕКА ПО ПРАВИЛАМ ЮKASSA ---
+        // --- 3. ФОРМИРУЕМ ПОЗИЦИИ ЧЕКА ---
+        console.log('Начинаем формировать позиции чека...');
 
-        // 3.1. АРЕНДА ЗАЛА (ОБЯЗАТЕЛЬНАЯ ПОЗИЦИЯ)
-        const hallPrice = amount; // Пока вся сумма на аренду
+        // 3.1. АРЕНДА ЗАЛА - ОСНОВНАЯ ПОЗИЦИЯ (ВСЕГДА ЕСТЬ)
+        const hallDescription = `Аренда банкетного зала №${metadata.hall || metadata.hallNumber}`;
         receipt.items.push({
-            description: `Аренда банкетного зала №${metadata.hall || metadata.hallNumber}`,
+            description: hallDescription.substring(0, 128),
             quantity: '1.00',
             amount: {
-                value: hallPrice.toFixed(2), // Вся сумма на эту позицию
+                value: amount.toFixed(2), // ВСЯ сумма на аренду
                 currency: 'RUB'
             },
-            vat_code: 1, // ОБСУДИТЕ С БУХГАЛТЕРОМ!
-            payment_subject: 'service', // Услуга
+            vat_code: 1,
+            payment_subject: 'service',
             payment_mode: 'full_payment'
         });
+        console.log('Добавлена позиция "Аренда зала"');
 
-        // 3.2. КОММЕНТАРИИ КЛИЕНТА (НУЛЕВАЯ СТОИМОСТЬ - ТОЛЬКО ДЛЯ ИНФОРМАЦИИ)
+        // 3.2. КОММЕНТАРИИ КЛИЕНТА (ТОЛЬКО ЕСЛИ ЕСТЬ)
         if (customerComments && customerComments.trim() !== '') {
-            const commentText = customerComments.length > 100 
-                ? customerComments.substring(0, 100) + '...' 
-                : customerComments;
-            
+            const commentText = `Пожелание: ${customerComments.substring(0, 100)}`;
             receipt.items.push({
-                description: `Пожелание: ${commentText}`,
+                description: commentText,
                 quantity: '1.00',
                 amount: {
-                    value: '0.01', // ЮKassa может не принимать 0.00, ставим 1 копейку
+                    value: '0.01', // 1 копейка - ЮKassa принимает ненулевые значения
+                    currency: 'RUB'
+                },
+                vat_code: 1,
+                payment_subject: 'service',
+                payment_mode: 'full_payment'
+            });
+            console.log('Добавлен комментарий клиента');
+        }
+
+        // 3.3. ЗАКАЗАННЫЕ БЛЮДА ИЛИ ЗАГЛУШКА "НЕТ БЛЮД"
+        if (receiptItems && receiptItems.length > 0) {
+            console.log(`Добавляем ${receiptItems.length} блюд в чек`);
+            receiptItems.forEach((item, index) => {
+                receipt.items.push({
+                    description: String(item.name || `Позиция ${index + 1}`).substring(0, 128),
+                    quantity: String(item.quantity || 1),
+                    amount: {
+                        value: (Number(item.price || 0) * Number(item.quantity || 1)).toFixed(2),
+                        currency: 'RUB'
+                    },
+                    vat_code: 1,
+                    payment_subject: 'commodity',
+                    payment_mode: 'full_payment'
+                });
+            });
+        } else {
+            // 3.4. ЗАГЛУШКА ЕСЛИ БЛЮД НЕТ
+            console.log('Блюда не заказаны, добавляем заглушку');
+            receipt.items.push({
+                description: 'Без заказанных блюд',
+                quantity: '1.00',
+                amount: {
+                    value: '0.01', // Минимальная ненулевая сумма
                     currency: 'RUB'
                 },
                 vat_code: 1,
@@ -82,37 +123,24 @@ router.post('/create-payment', async (req, res) => {
             });
         }
 
-        // 3.3. ЗАКАЗАННЫЕ БЛЮДА (ЕСЛИ ЕСТЬ)
-        if (receiptItems && receiptItems.length > 0) {
-            receiptItems.forEach(item => {
-                if (!item.name || !item.quantity || !item.price) {
-                    console.warn('Пропускаем неполный элемент:', item);
-                    return;
-                }
-                
-                receipt.items.push({
-                    description: String(item.name).substring(0, 128),
-                    quantity: String(item.quantity),
-                    amount: {
-                        value: (Number(item.price) * Number(item.quantity)).toFixed(2),
-                        currency: 'RUB'
-                    },
-                    vat_code: 1,
-                    payment_subject: 'commodity', // Товар
-                    payment_mode: 'full_payment'
-                });
-            });
-        }
+        // 3.5. ПРОВЕРКА И ЛОГИРОВАНИЕ
+        console.log('Итоговый чек содержит позиций:', receipt.items.length);
+        console.log('Структура чека для отладки:');
+        receipt.items.forEach((item, i) => {
+            console.log(`  [${i}] ${item.description}: ${item.amount.value} руб. x${item.quantity}`);
+        });
 
-        // 3.4. ПРОВЕРКА: ЕСЛИ НЕТ БЛЮД, ДЕЛАЕМ ОДНУ ПОЗИЦИЮ "АРЕНДА ЗАЛА"
-        if (receipt.items.length === 0) {
-            console.error('Невозможно создать чек без позиций!');
-            return res.status(400).json({ 
-                success: false, 
-                error: 'В чеке должна быть хотя бы одна позиция' 
-            });
-        }
+        // Проверяем сумму чека
+        const totalReceiptAmount = receipt.items.reduce((sum, item) => {
+            return sum + (parseFloat(item.amount.value) * parseFloat(item.quantity));
+        }, 0);
 
+        console.log(`Сумма чека: ${totalReceiptAmount.toFixed(2)} руб., Сумма платежа: ${amount} руб.`);
+
+        // Допустима небольшая разница из-за комментариев за 0.01
+        if (Math.abs(totalReceiptAmount - amount) > 0.02) {
+            console.warn('⚠️ Разница в суммах больше 2 копеек. Возможна ошибка.');
+        }
         console.log('Сформирован чек с позициями:', receipt.items);
         // --- 4. ПРОВЕРКА СУММЫ ---
         // ЮKassa строго следит, чтобы сумма в чеке равнялась сумме платежа
