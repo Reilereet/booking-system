@@ -34,21 +34,33 @@ router.post('/create-payment', async (req, res) => {
         });
 
         const payment = await yooKassaClient.createPayment({
-            amount: {
-                value: amount.toFixed(2),
-                currency: 'RUB'
-            },
-            payment_method_data: {
-                type: 'bank_card'
-            },
-            confirmation: {
-                type: 'redirect',
-                return_url: return_url
-            },
+            amount: { value: amount.toFixed(2), currency: 'RUB' },
+            payment_method_data: { type: 'bank_card' },
+            confirmation: { type: 'redirect', return_url: return_url },
             description: description,
             metadata: metadata,
             capture: true,
-            save_payment_method: false
+            // НОВЫЙ БЛОК: Данные для фискального чека (54-ФЗ)
+            receipt: {
+                customer: {
+                    // Используйте данные из bookingData.contact
+                    email: bookingData.contact.email || 'client@example.com', // Обязательно
+                    // phone: bookingData.contact.phone // Альтернатива email
+                },
+                items: [
+                    {
+                        description: description, // Краткое описание
+                        quantity: '1', // Количество
+                        amount: {
+                            value: amount.toFixed(2), // Стоимость
+                            currency: 'RUB'
+                        },
+                        vat_code: 1, // Ставка НДС (1 = 20%)
+                        payment_mode: 'full_payment', // Полный расчет
+                        payment_subject: 'service' // Предмет расчета (услуга)
+                    }
+                ]
+            }
         }, idempotenceKey);
 
         console.log('Платеж создан:', payment.id);
