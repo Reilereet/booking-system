@@ -1,8 +1,8 @@
 const router = require('express').Router();
 const { v4: uuidv4 } = require('uuid');
-const yooKassa = require('yookassa');
+const { YooCheckout } = require('@a2seven/yoo-checkout');
 
-const yooKassaClient = new yooKassa({
+const yooKassaClient = new YooCheckout({
     shopId: process.env.YOOKASSA_SHOP_ID,
     secretKey: process.env.YOOKASSA_SECRET_KEY
 });
