@@ -9,35 +9,115 @@ const yooKassaClient = new YooCheckout({
 
 router.post('/create-payment', async (req, res) => {
     try {
-        // 1. Получаем ВСЕ данные из тела запроса от вашего фронтенда (Tilda)
         const {
             amount,
             description,
             return_url,
-            email, // Клиентский email ДОЛЖЕН передаваться с фронтенда
             metadata = {}
         } = req.body;
 
-        // 2. Простая валидация обязательных полей
-        if (!amount || amount < 1) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Некорректная сумма оплаты' 
-            });
-        }
-        if (!email) {
+        console.log('Получены метаданные от клиента:', metadata); // ← ДЛЯ ОТЛАДКИ
+
+        // --- 1. ИЗВЛЕКАЕМ ДАННЫЕ ДЛЯ ЧЕКА ИЗ METADATA ---
+        // Убедимся, что email точно есть и он не пустой
+        const customerEmail = metadata.email?.trim();
+        if (!customerEmail || customerEmail === 'no-email@example.com') {
+            console.error('❌ Отсутствует или невалиден email:', customerEmail);
             return res.status(400).json({ 
                 success: false, 
                 error: 'Для создания платежа требуется email клиента' 
             });
         }
-
-        const idempotenceKey = require('uuid').v4();
         
-        console.log('Создание платежа. Данные:', { amount, description, email });
+        const customerName = metadata.name?.trim() || 'Клиент';
+        const customerPhone = metadata.phone?.trim() || '';
+        const customerComments = metadata.comments?.trim() || ''; // ← НОВОЕ: комментарии
+        
+        // Получаем массив заказанных блюд
+        const receiptItems = metadata.items || [];
+        console.log('Извлеченные данные:', { customerEmail, customerName, itemsCount: receiptItems.length });
 
-        // 3. Формируем объект платежа для ЮKassa
-        const paymentData = {
+        // --- 2. ФОРМИРУЕМ ОБЪЕКТ "RECEIPT" ДЛЯ ЮKASSA ---
+        const receipt = {
+            customer: {
+                email: customerEmail,
+                full_name: customerName, // Полное имя для чека
+                phone: customerPhone,    // Телефон (опционально, но желательно)
+            },
+            items: []
+        };
+
+        // --- 3. ДОБАВЛЯЕМ ПОЗИЦИИ В ЧЕК ---
+        // Важно: Сумма всех позиций (quantity * price) должна равняться amount платежа
+        
+        // Пример: Добавляем саму аренду зала как первую позицию
+        const hallDescription = `Аренда зала №${metadata.hall || metadata.hallNumber} на ${metadata.date} ${metadata.time}`;
+        receipt.items.push({
+            description: hallDescription,
+            quantity: '1.00',
+            amount: {
+                value: amount.toFixed(2), // Вся сумма на аренду
+                currency: 'RUB'
+            },
+            vat_code: 1,
+            payment_mode: 'full_payment',
+            payment_subject: 'service'
+        });
+
+        // --- НОВОЕ: ДОБАВЛЯЕМ КОММЕНТАРИИ КЛИЕНТА КАК ОТДЕЛЬНУЮ ПОЗИЦИЮ ---
+        if (customerComments) {
+            receipt.items.push({
+                description: `Комментарий к заказу: ${customerComments.substring(0, 128)}`, // Обрезаем длинные комментарии
+                quantity: '1.00',
+                amount: {
+                    value: '0.00', // НУЛЕВАЯ СТОИМОСТЬ - только информация
+                    currency: 'RUB'
+                },
+                vat_code: 1,
+                payment_mode: 'full_payment',
+                payment_subject: 'service'
+            });
+        }
+
+        // Добавляем блюда из заказа
+        if (receiptItems.length > 0) {
+            receiptItems.forEach(item => {
+                receipt.items.push({
+                    description: item.name.substring(0, 64), // Ограничение длины для ЮKassa
+                    quantity: item.quantity.toString(),
+                    amount: {
+                        value: (item.price * item.quantity).toFixed(2),
+                        currency: 'RUB'
+                    },
+                    vat_code: 1,
+                    payment_mode: 'full_payment',
+                    payment_subject: 'commodity'
+                });
+            });
+        }
+
+        // --- 4. ПРОВЕРКА СУММЫ ---
+        // ЮKassa строго следит, чтобы сумма в чеке равнялась сумме платежа
+        const totalReceiptAmount = receipt.items.reduce((sum, item) => {
+            return sum + (parseFloat(item.amount.value) * parseFloat(item.quantity));
+        }, 0);
+        
+        if (Math.abs(totalReceiptAmount - amount) > 0.01) {
+            console.warn(`⚠️ Сумма чека (${totalReceiptAmount}) не равна сумме платежа (${amount})`);
+            // Можно откорректировать последнюю позицию или добавить корректировочную позицию
+        }
+
+        const idempotenceKey = uuidv4();
+        
+        console.log('Создание платежа с чеком:', {
+            amount,
+            description,
+            customer: customerEmail,
+            items_count: receipt.items.length
+        });
+
+        // --- 5. ПЕРЕДАЁМ RECEIPT В ЗАПРОС К ЮKASSA ---
+        const payment = await yooKassaClient.createPayment({
             amount: {
                 value: amount.toFixed(2),
                 currency: 'RUB'
@@ -49,35 +129,14 @@ router.post('/create-payment', async (req, res) => {
                 type: 'redirect',
                 return_url: return_url
             },
-            description: description || 'Оплата бронирования',
+            description: description,
             metadata: metadata,
             capture: true,
-            // 4. Добавляем чек, если передан email
-            receipt: {
-                customer: {
-                    email: email // Используем email из запроса
-                },
-                items: [
-                    {
-                        description: description || 'Бронирование банкетного зала',
-                        quantity: '1.00',
-                        amount: {
-                            value: amount.toFixed(2),
-                            currency: 'RUB'
-                        },
-                        vat_code: 1, // Ставка НДС 20%
-                        payment_mode: 'full_payment',
-                        payment_subject: 'service'
-                    }
-                ]
-            }
-        };
+            receipt: receipt // ← ВОТ ГЛАВНОЕ ИЗМЕНЕНИЕ!
+        }, idempotenceKey);
 
-        // 5. Создаем платеж
-        const payment = await yooKassaClient.createPayment(paymentData, idempotenceKey);
-
-        console.log('Платеж создан:', payment.id);
-
+        console.log('Платеж и чек созданы:', payment.id);
+        
         res.json({
             success: true,
             payment_id: payment.id,
@@ -85,10 +144,10 @@ router.post('/create-payment', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Ошибка создания платежа:', error);
+        console.error('❌ Ошибка создания платежа с чеком:', error);
         res.status(500).json({ 
             success: false, 
-            error: error.message || 'Ошибка при создании платежа'
+            error: error.message || 'Ошибка при создании платежа с чеком'
         });
     }
 });
